@@ -1,0 +1,49 @@
+# Configuration for 2x H100 (80GB each) Setup
+# Uses DeepSpeed ZeRO-3 with NVMe offloading
+
+# Model
+model_name_or_path: "moonshotai/Kimi-Linear-48B-A3B-Base"
+trust_remote_code: true
+
+# Data
+data_dir: "./data/tokenized_2m"
+use_curriculum: true
+
+# Training
+output_dir: "./checkpoints/kimi-2m-h100"
+num_train_steps: 30000  # Real training: ~100-150B tokens total
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 256  # Effective global batch = 256 * 2 = 512 sequences = ~1B tokens/step
+
+# Optimization  
+learning_rate: 1.0e-5  # Conservative for continual pretraining (original was likely 1e-4 to 3e-4)
+weight_decay: 0.1  # Standard for large models
+warmup_steps: 1000  # ~1B tokens of warmup
+lr_scheduler_type: "cosine"
+max_grad_norm: 1.0
+
+# Mixed Precision
+bf16: true
+fp16: false
+
+# Memory Optimization
+gradient_checkpointing: true
+deepspeed: "./deepspeed_config_h100.json"
+
+# Logging
+logging_steps: 10
+save_steps: 500
+eval_steps: 500
+wandb_project: "kimi-linear-2m"
+wandb_run_name: "h100-2x80gb-2m-continual"
+
+# Misc
+seed: 42
+resume_from_checkpoint: null
+
+# Hardware-Specific Notes:
+# - H100 has 80GB memory, allowing larger effective batch size
+# - Expected memory usage: ~75GB per GPU at 2M length
+# - Training speed: ~1.5-2.5 steps/second
+# - MegaMath-Web-Pro: 40-100B tokens, ideal for continual pretraining
+# - Estimated time: 1-3 days for full dataset

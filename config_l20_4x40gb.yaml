@@ -1,0 +1,60 @@
+# Configuration for 4x L20 (40GB each) Setup
+# Uses FSDP with aggressive memory optimizations
+
+# Model
+model_name_or_path: "moonshotai/Kimi-Linear-48B-A3B-Base"
+trust_remote_code: true
+
+# Data
+data_dir: "./data/tokenized_2m"
+use_curriculum: true
+
+# Training
+output_dir: "./checkpoints/kimi-2m-l20"
+num_train_steps: 30000  # Real training: ~100-150B tokens total  
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 512  # Effective global batch = 512 * 4 = 2048 sequences = ~4B tokens/step
+
+# Optimization
+learning_rate: 1.0e-5  # Conservative for continual pretraining
+weight_decay: 0.1  # Standard for large models
+warmup_steps: 1000  # ~4B tokens of warmup
+lr_scheduler_type: "cosine"
+max_grad_norm: 1.0
+
+# Mixed Precision
+bf16: true
+fp16: false
+
+# Memory Optimization
+gradient_checkpointing: true
+fsdp: true
+
+# FSDP Configuration (set via environment variables)
+# FSDP_SHARDING_STRATEGY: "FULL_SHARD"  # ZeRO-3 equivalent
+# FSDP_OFFLOAD_PARAMS: "true"  # Offload to CPU
+# FSDP_STATE_DICT_TYPE: "SHARDED_STATE_DICT"
+# FSDP_TRANSFORMER_CLS_TO_WRAP: "KimiLinearDecoderLayer"  # Wrap transformer layers
+# FSDP_BACKWARD_PREFETCH: "BACKWARD_PRE"
+# FSDP_AUTO_WRAP_POLICY: "TRANSFORMER_BASED_WRAP"
+# FSDP_USE_ORIG_PARAMS: "false"
+
+# Logging
+logging_steps: 10
+save_steps: 500
+eval_steps: 500
+wandb_project: "kimi-linear-2m"
+wandb_run_name: "l20-4x40gb-2m-continual"
+
+# Misc
+seed: 42
+resume_from_checkpoint: null
+
+# Hardware-Specific Notes:
+# - L20 has 40GB memory, so we use full FSDP sharding + CPU offload
+# - Batch size 1 per device is maximum for 2M sequences
+# - Gradient accumulation of 512 provides stable training
+# - Expected memory usage: ~38GB per GPU at 2M length
+# - Training speed: ~0.5-1.0 steps/second
+# - MegaMath-Web-Pro: 40-100B tokens, ideal for continual pretraining
+# - Estimated time: 2-4 days for full dataset

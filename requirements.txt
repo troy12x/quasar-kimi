@@ -1,0 +1,34 @@
+# Flash Linear Attention with KDA kernel (CRITICAL!)
+flash-linear-attention>=0.0.1
+# Install from source if needed: pip install git+https://github.com/fla-org/flash-linear-attention.git
+
+# Transformers and accelerate
+transformers>=4.57.0
+accelerate>=0.34.0
+torch>=2.0.0
+tokenizers>=0.15.0
+
+# DeepSpeed (for ZeRO-3 optimization)
+deepspeed>=0.14.0
+
+# Flash Attention for MLA layers
+flash-attn>=2.5.0
+triton>=2.1.0
+
+# Data processing
+datasets>=2.18.0
+huggingface-hub>=0.20.0
+
+# Logging and monitoring
+wandb>=0.16.0
+tensorboard>=2.15.0
+
+# Utilities
+numpy>=1.24.0
+tqdm>=4.65.0
+pyyaml>=6.0
+einops>=0.7.0
+
+# Optional but recommended
+ninja>=1.11.0  # For faster compilation
+psutil>=5.9.0  # Memory monitoring
