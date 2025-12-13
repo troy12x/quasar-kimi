@@ -1,19 +1,42 @@
 #!/bin/bash
 # Prune Kimi-Linear-48B-A3B-Base using REAP
-# Reduces 256 experts to 128 (50% compression) with near-lossless performance
+# 50% compression (256 -> 128 experts)
 
 # Configuration
-MODEL="moonshotai/Kimi-Linear-48B-A3B-Base"
-DATASET="sumukshashidhar-archive/Ultra-FineWeb-100M"  # REAP default calibration dataset
-COMPRESSION=0.5  # 50% pruning (256 → 128 experts)
+# Configuration
+# 1. HuggingFace Mirror (Enabled by default for stability)
+export HF_ENDPOINT=https://hf-mirror.com
+
+# 2. Model Selection
+MODEL_ID="moonshotai/Kimi-Linear-48B-A3B-Base"
+LOCAL_MODEL_PATH="$(pwd)/model_data/Kimi-Linear-48B-A3B-Base"
+
+# Check for ROBUST local download (from download_model.py)
+if [ -f "$LOCAL_MODEL_PATH/config.json" ]; then
+    echo "ℹ️ Found downloaded model in: $LOCAL_MODEL_PATH"
+    MODEL="$LOCAL_MODEL_PATH"
+# Fallback check for current directory (must have config AND code)
+elif [ -f "config.json" ] && [ -f "configuration_kimi.py" ]; then
+    echo "ℹ️ Found valid local model (config + code) in current directory."
+    echo "ℹ️ Using local model: $(pwd)"
+    MODEL="$(pwd)"
+else
+     echo "⚠️ No complete local model found."
+     echo "ℹ️ Will attempt download from HuggingFace cache: $MODEL_ID"
+     MODEL="$MODEL_ID"
+fi
+DATASET="sumukshashidhar-archive/Ultra-FineWeb-100M"
+COMPRESSION=0.5
 PRUNING_METHOD="reap"
 SEED=42
-NUM_SAMPLES=1024
-
+NUM_SAMPLES=15
 # GPU configuration
-export CUDA_VISIBLE_DEVICES=0  # Adjust based on your setup
-FIRST_DEVICE=0
-PORT=8000
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+FIRST_DEVICE=$(echo $CUDA_VISIBLE_DEVICES | cut -d',' -f1)
+PORT=$((8000 + FIRST_DEVICE))
+export REAP_OUTPUT_DIR="/shared/quasar_artifacts"
+export TRITON_CACHE_DIR="/shared/.triton/cache"
+mkdir -p "$TRITON_CACHE_DIR"
 
 OUTPUT_FILE="observations_${NUM_SAMPLES}_cosine-seed_${SEED}.pt"
 SERVER_LOG="reap-kimi-pruning.log"
@@ -21,22 +44,42 @@ SERVER_LOG="reap-kimi-pruning.log"
 echo "========================================="
 echo "REAP Expert Pruning for Kimi Linear"
 echo "========================================="
-echo "Model: $MODEL"
-echo "Dataset: $DATASET"
-echo "Compression: ${COMPRESSION} (256 → 128 experts)"
-echo "Method: $PRUNING_METHOD"
-echo "========================================="
 
-# Step 1: Add Kimi and Ultra-FineWeb support to REAP
-echo "Adding Kimi model and Ultra-FineWeb dataset support to REAP..."
-python add_kimi_to_reap.py
-python add_ultrafineweb_to_reap.py
+# 1. Check for REAP and Install
+if [ ! -d "reap" ]; then
+    echo "⚠️ REAP directory not found. Cloning from GitHub..."
+    git clone https://github.com/cerebras/reap.git
+    cd reap
+    # Initialize submodules because pyproject.toml references third-party/ directories!
+    git submodule update --init --recursive
+    cd ..
+else
+    echo "✓ REAP directory found."
+    # Ensure submodules are populated if they were missed
+    if [ -d "reap/third-party" ] && [ -z "$(ls -A reap/third-party)" ]; then
+         echo "⚠️ Populating missing submodules..."
+         cd reap
+         git submodule update --init --recursive
+         cd ..
+    fi
+fi
 
-# Step 2: Run REAP pruning
-echo "Running expert pruning (this will take ~30-60 minutes)..."
-cd reap
+echo "📦 Fixing dependencies..."
+export SKLEARN_ALLOW_DEPRECATED_SKLEARN_PACKAGE_INSTALL=True
+pip install scikit-learn
 
-python /src/reap/prune.py \
+echo "🔧 Enforcing correct 'fla-core' installation (fixing import error)..."
+# Force reinstall to ensure the correct package provides 'fla.layers'
+# and to fix potential 'already installed' corruption or namespace conflicts
+
+echo "📦 Installing REAP in editable mode..."
+# We use --no-build-isolation to avoid metadata build failures often caused by missing build deps
+#pip install -e reap --no-build-isolation
+
+# 2. Run Pruning via Custom Runner
+echo "🚀 Running pruning (incorporates Kimi/UltraFineWeb registration)..."
+# We run from current directory, python path should pick up installed 'reap' package
+python run_reap_custom.py \
     --model-name "$MODEL" \
     --dataset-name "$DATASET" \
     --compression-ratio $COMPRESSION \
@@ -53,20 +96,7 @@ python /src/reap/prune.py \
     --samples_per_category $NUM_SAMPLES \
     --record_pruning_metrics_only true
 
-# Extract pruned model directory
-SHORT_MODEL="Kimi-Linear-48B-A3B-Base"
-SHORT_DATASET="Ultra-FineWeb-100M"
-PRUNED_MODEL_DIR="artifacts/${SHORT_MODEL}/${SHORT_DATASET}/pruned_models/reap-seed_${SEED}-${COMPRESSION}"
-
 echo "========================================="
-echo "✓ Pruning complete!"
-echo "Pruned model saved to: $PRUNED_MODEL_DIR"
+echo "✓ Pruning process finished."
+echo "Check $SERVER_LOG for details."
 echo "========================================="
-echo ""
-echo "Next steps:"
-echo "1. The pruned model is now 128 experts (was 256)"
-echo "2. Use this pruned model for continual pretraining"
-echo "3. Training will be ~2× faster and use ~50% less memory"
-echo ""
-echo "To use the pruned model in training, update train_continual_2m.py:"
-echo "  --model_name_or_path=\"$PRUNED_MODEL_DIR\""

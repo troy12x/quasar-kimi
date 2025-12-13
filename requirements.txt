@@ -18,7 +18,7 @@ tokenizers>=0.15.0
 deepspeed>=0.14.0
 
 # Flash Attention for MLA layers
-flash-attn>=2.5.0
+
 triton>=2.1.0
 
 # Data processing
