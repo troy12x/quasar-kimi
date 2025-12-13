@@ -35,7 +35,7 @@ python add_kimi_to_reap.py
 echo "Running expert pruning (this will take ~30-60 minutes)..."
 cd reap
 
-python src/reap/prune.py \
+python /reap/prune.py \
     --model-name "$MODEL" \
     --dataset-name "$DATASET" \
     --compression-ratio $COMPRESSION \
