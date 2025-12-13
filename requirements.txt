@@ -1,11 +1,17 @@
+# Python >= 3.10 required
+# PyTorch >= 2.6 required
+
 # Flash Linear Attention with KDA kernel (CRITICAL!)
-flash-linear-attention>=0.0.1
-# Install from source if needed: pip install git+https://github.com/fla-org/flash-linear-attention.git
+# Official requirement from Kimi Linear
+fla-core>=0.4.0
+
+# PyTorch
+torch>=2.6.0
+torchvision>=0.21.0
 
 # Transformers and accelerate
 transformers>=4.57.0
 accelerate>=0.34.0
-torch>=2.0.0
 tokenizers>=0.15.0
 
 # DeepSpeed (for ZeRO-3 optimization)
