@@ -4,7 +4,7 @@
 
 # Configuration
 MODEL="moonshotai/Kimi-Linear-48B-A3B-Base"
-DATASET="theblackcat102/evol-codealpaca-v1"  # REAP default calibration dataset
+DATASET="sumukshashidhar-archive/Ultra-FineWeb-100M"  # REAP default calibration dataset
 COMPRESSION=0.5  # 50% pruning (256 → 128 experts)
 PRUNING_METHOD="reap"
 SEED=42
@@ -27,15 +27,16 @@ echo "Compression: ${COMPRESSION} (256 → 128 experts)"
 echo "Method: $PRUNING_METHOD"
 echo "========================================="
 
-# Step 1: Add Kimi support to REAP
-echo "Adding Kimi model support to REAP..."
+# Step 1: Add Kimi and Ultra-FineWeb support to REAP
+echo "Adding Kimi model and Ultra-FineWeb dataset support to REAP..."
 python add_kimi_to_reap.py
+python add_ultrafineweb_to_reap.py
 
 # Step 2: Run REAP pruning
 echo "Running expert pruning (this will take ~30-60 minutes)..."
 cd reap
 
-python /reap/prune.py \
+python /src/reap/prune.py \
     --model-name "$MODEL" \
     --dataset-name "$DATASET" \
     --compression-ratio $COMPRESSION \
@@ -54,7 +55,7 @@ python /reap/prune.py \
 
 # Extract pruned model directory
 SHORT_MODEL="Kimi-Linear-48B-A3B-Base"
-SHORT_DATASET="evol-codealpaca-v1"
+SHORT_DATASET="Ultra-FineWeb-100M"
 PRUNED_MODEL_DIR="artifacts/${SHORT_MODEL}/${SHORT_DATASET}/pruned_models/reap-seed_${SEED}-${COMPRESSION}"
 
 echo "========================================="
