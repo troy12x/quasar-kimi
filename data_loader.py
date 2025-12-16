@@ -54,6 +54,17 @@ class TokenizedDataset(IterableDataset):
         
         # Memory-map the tokens file
         tokens_file = self.data_dir / "tokens.bin"
+        
+        # Verify file size matches metadata
+        file_size_bytes = tokens_file.stat().st_size
+        bytes_per_chunk = self.max_seq_length * 4 # uint32 = 4 bytes
+        actual_chunks = file_size_bytes // bytes_per_chunk
+        
+        if actual_chunks != self.num_chunks:
+            print(f"WARNING: Metadata claims {self.num_chunks} chunks, but file size supports {actual_chunks} chunks.")
+            print("Adjusting to actual file size to prevent crash.")
+            self.num_chunks = actual_chunks
+            
         self.tokens_mmap = np.memmap(
             tokens_file,
             dtype=np.uint32,
@@ -195,6 +206,10 @@ class ProgressiveCurriculumDataLoader:
     def __iter__(self):
         """Iterate over dataloader."""
         return iter(self.dataloader)
+    
+    def __len__(self):
+        """Return length of dataloader."""
+        return len(self.dataloader)
     
     def get_current_seq_length(self) -> int:
         """Get current sequence length."""

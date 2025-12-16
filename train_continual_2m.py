@@ -7,6 +7,7 @@ import os
 import sys
 import json
 import argparse
+import traceback
 from pathlib import Path
 from typing import Optional, Dict
 import numpy as np
@@ -48,7 +49,7 @@ def parse_args():
     parser.add_argument(
         "--model_name_or_path",
         type=str,
-        default="moonshotai/Kimi-Linear-48B-A3B-Base",
+        default="silx-ai/Quasar-2M-Base",
         help="Model identifier from huggingface.co/models",
     )
     parser.add_argument(
@@ -94,7 +95,7 @@ def parse_args():
     parser.add_argument(
         "--gradient_accumulation_steps",
         type=int,
-        default=64,
+        default=1,
         help="Number of gradient accumulation steps",
     )
     parser.add_argument(
@@ -209,6 +210,14 @@ def parse_args():
         help="Path to checkpoint to resume from",
     )
     
+    # Distributed training arguments (added by launchers like DeepSpeed)
+    parser.add_argument(
+        "--local_rank",
+        type=int,
+        default=-1,
+        help="Local rank for distributed training (set by launcher)",
+    )
+    
     args = parser.parse_args()
     return args
 
@@ -227,6 +236,15 @@ def setup_model_and_tokenizer(args, accelerator):
     if hasattr(config, 'model_max_length'):
         config.model_max_length = 2_097_152
         print(f"Updated model_max_length to {config.model_max_length:,}")
+        
+    # Fix for DeepSpeed ZeRO-3: padding_idx can be out of bounds if embedding is sharded
+    if config.pad_token_id is not None:
+        print(f"Clearing config.pad_token_id (was {config.pad_token_id}) to avoid ZeRO-3 sharding issues")
+        config.pad_token_id = None
+    
+    # Disable KV cache for training
+    if hasattr(config, 'use_cache'):
+        config.use_cache = False
     
     # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(
@@ -235,18 +253,52 @@ def setup_model_and_tokenizer(args, accelerator):
         use_fast=True,
     )
     
-    # Load model with memory optimization
+    # Load model with ZeRO-3 Deferred Initialization
     if accelerator.is_main_process:
-        print("Loading model...")
+        print("Loading model with Deepspeed ZeRO-3 Init...")
         print_memory_stats("Before model load: ")
+
+    import deepspeed
+    # Use the DeepSpeed context to initialize weights directly on meta/partitioned directly
+    # This prevents the full model from exploding in RAM
+    ds_config_path = args.deepspeed
     
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model_name_or_path,
-        config=config,
-        trust_remote_code=args.trust_remote_code,
-        torch_dtype=torch.bfloat16 if args.bf16 else torch.float16,
-        use_cache=False,  # Disable KV cache for training
-    )
+    # We need to ensure we have the config available
+    if not ds_config_path:
+        # Fallback if config not passed directly (rare in accelerate)
+        print("Warning: No deepspeed config found in args, loading normally might OOM")
+        model = AutoModelForCausalLM.from_pretrained(
+            args.model_name_or_path,
+            config=config,
+            trust_remote_code=args.trust_remote_code,
+            torch_dtype=torch.bfloat16 if args.bf16 else torch.float16,
+        )
+    else:
+        # Patch "auto" values in config because zero.Init doesn't auto-resolve them
+        with open(ds_config_path, "r") as f:
+            ds_config_dict = json.load(f)
+        
+        # Calculate train batch size
+        total_batch_size = (
+            args.per_device_train_batch_size * 
+            args.gradient_accumulation_steps * 
+            accelerator.num_processes
+        )
+        
+        # Override auto with explicit values
+        ds_config_dict["train_micro_batch_size_per_gpu"] = args.per_device_train_batch_size
+        ds_config_dict["gradient_accumulation_steps"] = args.gradient_accumulation_steps
+        ds_config_dict["train_batch_size"] = total_batch_size
+        
+        print(f"DeepSpeed Deferred Init with Batch Size: {total_batch_size}")
+
+        with deepspeed.zero.Init(config_dict_or_path=ds_config_dict):
+            model = AutoModelForCausalLM.from_pretrained(
+                args.model_name_or_path,
+                config=config,
+                trust_remote_code=args.trust_remote_code,
+                torch_dtype=torch.bfloat16 if args.bf16 else torch.float16,
+            )
     
     if accelerator.is_main_process:
         print_memory_stats("After model load: ")
@@ -282,7 +334,10 @@ def setup_optimizer(args, model):
         },
     ]
     
-    optimizer = torch.optim.AdamW(
+    import bitsandbytes as bnb
+    print("Using 8-bit AdamW optimizer")
+    
+    optimizer = bnb.optim.AdamW8bit(
         optimizer_grouped_parameters,
         lr=args.learning_rate,
         betas=(0.9, 0.95),
@@ -298,11 +353,13 @@ def train(args):
     # Initialize accelerator
     ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=False)
     
+    # When using DeepSpeed, don't let accelerator handle device placement
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         mixed_precision='bf16' if args.bf16 else ('fp16' if args.fp16 else 'no'),
         log_with="wandb" if args.wandb_project else None,
         kwargs_handlers=[ddp_kwargs],
+        deepspeed_plugin=None if not args.deepspeed else None,  # Let DeepSpeed handle everything
     )
     
     # Set seed
@@ -325,7 +382,7 @@ def train(args):
     if accelerator.is_main_process:
         print(f"\nSetting up dataloader from {args.data_dir}...")
     
-    train_dataloader = create_dataloader(
+    curriculum_dataloader = create_dataloader(
         data_dir=args.data_dir,
         batch_size=args.per_device_train_batch_size,
         rank=accelerator.process_index,
@@ -334,6 +391,14 @@ def train(args):
         num_workers=0,
         use_curriculum=args.use_curriculum,
     )
+    
+    # Extract the actual dataloader for accelerator.prepare()
+    if hasattr(curriculum_dataloader, 'dataloader'):
+        # It's a ProgressiveCurriculumDataLoader wrapper
+        train_dataloader = curriculum_dataloader.dataloader
+    else:
+        # It's already a DataLoader
+        train_dataloader = curriculum_dataloader
     
     # Setup optimizer
     optimizer = setup_optimizer(args, model)
@@ -347,9 +412,17 @@ def train(args):
     )
     
     # Prepare everything with accelerator
+    # For large models, we need to avoid accelerator.prepare() moving the model to GPU
+    # Instead, manually move to device and wrap with DDP
+    # Prepare everything with accelerator
+    # For ZeRO-3, the model must be prepared by accelerator to handle sharding correctly
     model, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
         model, optimizer, train_dataloader, lr_scheduler
     )
+    
+    # Store curriculum wrapper for later use
+    if hasattr(curriculum_dataloader, 'dataloader'):
+        curriculum_dataloader.dataloader = train_dataloader
     
     # Resume from checkpoint if specified
     starting_step = 0
@@ -386,33 +459,41 @@ def train(args):
     train_iterator = iter(train_dataloader)
     
     while global_step < args.num_train_steps:
-        # Update curriculum if using progressive training
-        if args.use_curriculum and hasattr(train_dataloader, 'update_curriculum'):
-            train_dataloader.update_curriculum(global_step)
-        
         try:
-            batch = next(train_iterator)
-        except StopIteration:
-            # Reset iterator if dataset is exhausted
-            train_iterator = iter(train_dataloader)
-            batch = next(train_iterator)
-        
-        with accelerator.accumulate(model):
-            # Forward pass
-            outputs = model(**batch)
-            loss = outputs.loss
+            # Update curriculum if using progressive training
+            if args.use_curriculum and hasattr(curriculum_dataloader, 'update_curriculum'):
+                curriculum_dataloader.update_curriculum(global_step)
+                # Reset iterator after curriculum update
+                train_iterator = iter(train_dataloader)
             
-            # Backward pass
-            accelerator.backward(loss)
+            try:
+                batch = next(train_iterator)
+            except StopIteration:
+                # Reset iterator if dataset is exhausted
+                train_iterator = iter(train_dataloader)
+                batch = next(train_iterator)
             
-            # Gradient clipping
-            if accelerator.sync_gradients:
-                accelerator.clip_grad_norm_(model.parameters(), args.max_grad_norm)
-            
-            # Optimizer step
-            optimizer.step()
-            lr_scheduler.step()
-            optimizer.zero_grad()
+            with accelerator.accumulate(model):
+                # Forward pass
+                outputs = model(**batch)
+                loss = outputs.loss
+                
+                # Backward pass
+                accelerator.backward(loss)
+                
+                # Gradient clipping
+                if accelerator.sync_gradients:
+                    accelerator.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+                
+                # Optimizer step
+                optimizer.step()
+                lr_scheduler.step()
+                optimizer.zero_grad()
+        except Exception as e:
+            if accelerator.is_main_process:
+                print(f"\nError at step {global_step}:")
+                print(traceback.format_exc())
+            raise
         
         # Update step counter
         if accelerator.sync_gradients:
@@ -428,8 +509,8 @@ def train(args):
                 }
                 
                 # Add sequence length info
-                if hasattr(train_dataloader, 'get_current_seq_length'):
-                    metrics["sequence_length"] = train_dataloader.get_current_seq_length()
+                if hasattr(curriculum_dataloader, 'get_current_seq_length'):
+                    metrics["sequence_length"] = curriculum_dataloader.get_current_seq_length()
                 
                 if accelerator.is_main_process:
                     progress_bar.set_postfix(metrics)
@@ -471,4 +552,12 @@ def train(args):
 
 if __name__ == "__main__":
     args = parse_args()
-    train(args)
+    try:
+        train(args)
+    except Exception as e:
+        print(f"\n{'='*60}")
+        print(f"ERROR in training process:")
+        print(f"{'='*60}")
+        print(traceback.format_exc())
+        print(f"{'='*60}\n")
+        sys.exit(1)
