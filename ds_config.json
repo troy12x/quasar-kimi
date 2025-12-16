@@ -13,6 +13,10 @@
     },
     "zero_optimization": {
         "stage": 3,
+        "offload_optimizer": {
+            "device": "cpu",
+            "pin_memory": true
+        },
         "overlap_comm": false,
         "contiguous_gradients": false,
         "sub_group_size": 1e9,
